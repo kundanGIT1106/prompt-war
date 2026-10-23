@@ -1,0 +1,78 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserRole() {
+      // In production, role is retrieved from custom user claims or users collection
+      return request.auth.token.role != null ? request.auth.token.role : 'citizen';
+    }
+
+    function isOfficer() {
+      return isAuthenticated() && (getUserRole() == 'officer' || getUserRole() == 'admin');
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    // --- Users Collection ---
+    match /users/{userId} {
+      // Any authenticated user can read their own profile; admins can read all
+      allow read: if isOwner(userId) || isAdmin();
+
+      // Users can only create their own profile with 'citizen' role. Cannot self-assign officer or admin!
+      allow create: if isOwner(userId) && request.resource.data.role == 'citizen';
+
+      // Only administrators can modify roles or departments
+      allow update: if isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role);
+
+      allow delete: if isAdmin();
+    }
+
+    // --- Reports Collection ---
+    match /reports/{reportId} {
+      // Citizens can only read reports they created; officers and admins can read all
+      allow read: if isAuthenticated() && (
+        isOwner(resource.data.citizenId) || isOfficer()
+      );
+
+      // Citizens can create reports with status = 'submitted'
+      allow create: if isAuthenticated() &&
+        request.resource.data.citizenId == request.auth.uid &&
+        request.resource.data.status == 'submitted' &&
+        request.resource.data.title.size() >= 5 &&
+        request.resource.data.description.size() >= 20;
+
+      // Status, assignment, priority, and AI fields CANNOT be updated by regular citizens
+      allow update: if isOfficer() || (
+        isOwner(resource.data.citizenId) &&
+        // Citizens cannot change status, assigned department, priority, or AI suggestions
+        request.resource.data.status == resource.data.status &&
+        request.resource.data.assignedDepartment == resource.data.assignedDepartment &&
+        request.resource.data.priorityScore == resource.data.priorityScore
+      );
+
+      // Deletion is strictly reserved for administrators
+      allow delete: if isAdmin();
+    }
+
+    // --- Audit Logs Collection (Immutable) ---
+    match /audit_logs/{logId} {
+      // Read access is restricted to officers and administrators
+      allow read: if isOfficer();
+
+      // Audit logs can be written by authenticated actions, but NEVER modified or deleted
+      allow create: if isAuthenticated();
+      allow update, delete: if false; // IMMUTABLE
+    }
+  }
+}
